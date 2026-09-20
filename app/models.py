@@ -88,3 +88,36 @@ class ExpandResponse(BaseModel):
     skipped_count: int = Field(..., description="因 skip 策略被跳过的次数")
     skipped_dates: list[str] = Field(..., description="被跳过实例的本地日期")
     instances: list[InstanceOut]
+
+
+MIN_DURATION_MINUTES = 1
+MAX_DURATION_MINUTES = 1440
+
+
+class ScheduleSpec(ExpandRequest):
+    """/overlaps 的一侧日程：展开参数与 /expand 完全一致，另附持续时长。"""
+
+    duration_minutes: int = Field(
+        ...,
+        ge=MIN_DURATION_MINUTES,
+        le=MAX_DURATION_MINUTES,
+        description="每个实例的持续分钟数，实例被解释为 [start, start+duration) 半开区间",
+    )
+
+
+class OverlapsRequest(BaseModel):
+    a: ScheduleSpec = Field(..., description="A 侧日程（展开参数 + duration_minutes）")
+    b: ScheduleSpec = Field(..., description="B 侧日程（展开参数 + duration_minutes）")
+
+
+class OverlapOut(BaseModel):
+    a_instance_start_utc: str = Field(..., description="A 侧重叠实例的起点（UTC，Z 结尾）")
+    b_instance_start_utc: str = Field(..., description="B 侧重叠实例的起点（UTC，Z 结尾）")
+    overlap_start_utc: str = Field(..., description="重叠区间起点（UTC，Z 结尾）")
+    overlap_end_utc: str = Field(..., description="重叠区间终点，半开不含（UTC，Z 结尾）")
+    overlap_minutes: int = Field(..., description="重叠分钟数")
+
+
+class OverlapsResponse(BaseModel):
+    count: int = Field(..., description="跨侧重叠段数")
+    overlaps: list[OverlapOut]

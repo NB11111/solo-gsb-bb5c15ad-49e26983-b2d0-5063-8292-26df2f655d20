@@ -27,6 +27,25 @@ class Instance:
     reason: str
 
 
+@dataclass(frozen=True)
+class Overlap:
+    """两个半开 UTC 区间跨侧重叠的一段。
+
+    区间 A=[a_start, a_start+duration_a) 与 B=[b_start, b_start+duration_b)
+    严格相交（lo < hi）时产生一条记录。
+    """
+
+    a_start: datetime
+    b_start: datetime
+    overlap_start: datetime
+    overlap_end: datetime
+
+    @property
+    def overlap_minutes(self) -> int:
+        """重叠时长（分钟，向下取整）。"""
+        return (self.overlap_end - self.overlap_start) // timedelta(minutes=1)
+
+
 def _valid_interpretations(naive: datetime, tz: ZoneInfo) -> dict[int, datetime]:
     """返回 {fold: UTC 时刻}，仅保留能通过 UTC 往返校验的解释。"""
     valid: dict[int, datetime] = {}
@@ -119,6 +138,58 @@ def expand_schedule(
     return ordered, skipped
 
 
+def find_overlaps(
+    a: list[Instance],
+    b: list[Instance],
+    duration_a: timedelta,
+    duration_b: timedelta,
+) -> list[Overlap]:
+    """扫描线枚举两侧活动区间的全部跨侧重叠。
+
+    每个实例解释为半开区间 ``[start, start+duration)``：边界相接（一个区间的
+    起点恰好落在另一区间的终点上）不算冲突。同侧实例即使相交也不产生结果。
+
+    返回结果按 ``overlap_start``（随后按两侧实例起点）稳定排序。
+    """
+    # (时刻, 类型: 0=结束 / 1=开始, 侧别: 0=A / 1=B, 起点)
+    events: list[tuple[datetime, int, int, datetime]] = []
+    for inst in a:
+        events.append((inst.utc, 1, 0, inst.utc))
+        events.append((inst.utc + duration_a, 0, 0, inst.utc))
+    for inst in b:
+        events.append((inst.utc, 1, 1, inst.utc))
+        events.append((inst.utc + duration_b, 0, 1, inst.utc))
+    # 同一时刻先处理结束再处理开始 -> 半开相接的区间不会被同时视为活动
+    events.sort()
+
+    active: tuple[set[datetime], set[datetime]] = (set(), set())
+    overlaps: list[Overlap] = []
+
+    for _, kind, side, start in events:
+        own = active[side]
+        other = active[1 - side]
+        if kind == 0:
+            own.discard(start)
+            continue
+        own.add(start)
+        for other_start in other:
+            lo = max(start, other_start)
+            if side == 0:
+                hi = min(start + duration_a, other_start + duration_b)
+            else:
+                hi = min(start + duration_b, other_start + duration_a)
+            if lo < hi:  # 半开区间：相接不算
+                if side == 0:
+                    overlaps.append(Overlap(start, other_start, lo, hi))
+                else:
+                    overlaps.append(Overlap(other_start, start, lo, hi))
+
+    overlaps.sort(
+        key=lambda o: (o.overlap_start, o.a_start, o.b_start, o.overlap_end)
+    )
+    return overlaps
+
+
 def _format_offset(td: timedelta) -> str:
     total = int(td.total_seconds())
     sign = "+" if total >= 0 else "-"
@@ -130,12 +201,17 @@ def _format_offset(td: timedelta) -> str:
     return f"{sign}{hh:02d}:{mm:02d}"
 
 
+def format_utc(dt: datetime) -> str:
+    """把 aware datetime 格式化为以 Z 结尾的 UTC ISO 8601 字符串。"""
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def instance_payload(inst: Instance, tz: ZoneInfo) -> dict:
     """把实例格式化为 API 响应字段（本地时间 / 偏移 / UTC / 决策原因）。"""
     local = inst.utc.astimezone(tz)
     return {
         "local": local.isoformat(),
         "offset": _format_offset(local.utcoffset()),
-        "utc": inst.utc.isoformat().replace("+00:00", "Z"),
+        "utc": format_utc(inst.utc),
         "reason": inst.reason,
     }
