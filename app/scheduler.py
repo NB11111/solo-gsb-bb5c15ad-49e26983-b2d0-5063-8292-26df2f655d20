@@ -27,6 +27,21 @@ class Instance:
     reason: str
 
 
+@dataclass(frozen=True)
+class Overlap:
+    """一次跨侧重叠：双方实例起点与重叠区间（均为 UTC）。"""
+
+    a_start: datetime
+    b_start: datetime
+    start: datetime
+    end: datetime
+
+    @property
+    def minutes(self) -> float:
+        """重叠时长（分钟）。"""
+        return (self.end - self.start).total_seconds() / 60
+
+
 def _valid_interpretations(naive: datetime, tz: ZoneInfo) -> dict[int, datetime]:
     """返回 {fold: UTC 时刻}，仅保留能通过 UTC 往返校验的解释。"""
     valid: dict[int, datetime] = {}
@@ -119,6 +134,48 @@ def expand_schedule(
     return ordered, skipped
 
 
+def find_overlaps(
+    *,
+    a_instances: list[Instance],
+    a_duration_minutes: int,
+    b_instances: list[Instance],
+    b_duration_minutes: int,
+) -> list[Overlap]:
+    """扫描线枚举两个日程的全部跨侧重叠。
+
+    每个实例解释为半开 UTC 区间 [start, start+duration)；边界相接
+    （一侧终点 == 另一侧起点）不算重叠。返回按重叠起点稳定排序的结果。
+    """
+    a_span = timedelta(minutes=a_duration_minutes)
+    b_span = timedelta(minutes=b_duration_minutes)
+    # (起点, 终点, 侧)：0=A，1=B；按起点排序，起点相同则终点早的、A 侧的在前
+    events = [(i.utc, i.utc + a_span, 0) for i in a_instances]
+    events += [(i.utc, i.utc + b_span, 1) for i in b_instances]
+    events.sort()
+
+    # 每侧的活动区间（起点, 终点）；新区间到达时先淘汰 end <= 起点的区间
+    active: list[list[tuple[datetime, datetime]]] = [[], []]
+    overlaps: list[Overlap] = []
+    for start, end, side in events:
+        active[0] = [iv for iv in active[0] if iv[1] > start]
+        active[1] = [iv for iv in active[1] if iv[1] > start]
+        for other_start, other_end in active[1 - side]:
+            ov_start = max(start, other_start)
+            ov_end = min(end, other_end)
+            if ov_start < ov_end:  # 半开区间：相接（ov_start == ov_end）不算冲突
+                a_start, b_start = (start, other_start) if side == 0 else (other_start, start)
+                overlaps.append(Overlap(a_start, b_start, ov_start, ov_end))
+        active[side].append((start, end))
+
+    overlaps.sort(key=lambda o: (o.start, o.end, o.a_start, o.b_start))
+    return overlaps
+
+
+def utc_iso(dt: datetime) -> str:
+    """把 UTC 时刻格式化为 Z 结尾的 ISO 8601 字符串。"""
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def _format_offset(td: timedelta) -> str:
     total = int(td.total_seconds())
     sign = "+" if total >= 0 else "-"
@@ -136,6 +193,6 @@ def instance_payload(inst: Instance, tz: ZoneInfo) -> dict:
     return {
         "local": local.isoformat(),
         "offset": _format_offset(local.utcoffset()),
-        "utc": inst.utc.isoformat().replace("+00:00", "Z"),
+        "utc": utc_iso(inst.utc),
         "reason": inst.reason,
     }

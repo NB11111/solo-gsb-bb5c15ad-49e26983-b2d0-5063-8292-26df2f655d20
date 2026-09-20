@@ -3,7 +3,8 @@
 基于 **FastAPI + 标准库 zoneinfo** 的民用日程展开 API。输入 IANA 时区、日期区间、
 星期集合与本地时刻，服务通过 **UTC 往返校验**区分正常 / 跳时（gap）/ 叠时（fold），
 按指定策略生成**去重且按 UTC 稳定排序**的实例，并返回每个实例的本地时间、UTC 偏移、
-UTC 时间与决策原因。
+UTC 时间与决策原因。`POST /overlaps` 在此基础上为两个日程各附加时长，
+用**扫描线**检测它们在真实时间轴上的全部冲突。
 
 ## 快速启动（单条命令）
 
@@ -80,13 +81,75 @@ docker compose up --build
 
 被 `skip` 策略跳过的日期不计入 `instances`，汇总在 `skipped_count` / `skipped_dates`。
 
+### `POST /overlaps`
+
+判断两个民用周期日程在真实时间轴上的冲突。请求体的 `a` / `b` 两侧各自携带
+与 `/expand` 相同的展开参数（含各自的 `gap_strategy` / `fold_strategy`），外加
+`duration_minutes`；两侧独立展开后，把每个实例解释为**半开 UTC 区间**
+`[start, start+duration)`，用扫描线枚举全部跨侧重叠。**边界相接不算冲突**
+（一侧终点等于另一侧起点时重叠为空）。
+
+请求体：
+
+```json
+{
+  "a": {
+    "timezone": "Europe/Berlin",
+    "start_date": "2026-03-02",
+    "end_date": "2026-03-02",
+    "weekdays": [0],
+    "local_time": "09:00",
+    "duration_minutes": 60
+  },
+  "b": {
+    "timezone": "America/New_York",
+    "start_date": "2026-03-02",
+    "end_date": "2026-03-02",
+    "weekdays": [0],
+    "local_time": "03:30",
+    "duration_minutes": 60
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `a` / `b` | object | 一侧日程：全部 `/expand` 请求字段 + `duration_minutes` |
+| `duration_minutes` | int | 每次实例的时长（分钟），`1`～`1440` |
+
+响应 `200`（`overlaps` 按 `overlap_start_utc` 排序）：
+
+```json
+{
+  "count": 1,
+  "overlaps": [
+    {
+      "a_start_utc": "2026-03-02T08:00:00Z",
+      "b_start_utc": "2026-03-02T08:30:00Z",
+      "overlap_start_utc": "2026-03-02T08:30:00Z",
+      "overlap_end_utc": "2026-03-02T09:00:00Z",
+      "minutes": 30.0
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `a_start_utc` / `b_start_utc` | 两侧实例起点（UTC，Z 结尾） |
+| `overlap_start_utc` / `overlap_end_utc` | 重叠区间起止（半开，UTC） |
+| `minutes` | 重叠时长（分钟） |
+
+每侧的日期区间同样限制为不超过 366 天，校验失败返回 422。
+
 ### 错误（422）
 
 以下情况返回 `422 Unprocessable Entity`：
 
 - 非法 IANA 时区名
 - `end_date` 早于 `start_date`（逆序区间）
-- 区间超过 366 天（`(end_date - start_date).days > 366`）
+- 区间超过 366 天（`(end_date - start_date).days > 366`，`/overlaps` 对每侧分别限制）
+- `duration_minutes` 不在 1～1440（仅 `/overlaps`）
 - 星期值越界（不在 0–6）或集合为空等其他字段校验失败
 
 ## 判定原理
@@ -109,9 +172,9 @@ pytest                               # 运行测试
 
 ```
 app/
-  main.py        # FastAPI 入口，/expand 与 /health
+  main.py        # FastAPI 入口，/expand、/overlaps 与 /health
   models.py      # 请求/响应模型与 422 校验规则
-  scheduler.py   # UTC 往返校验分类 + 展开 / 去重 / 排序核心逻辑
+  scheduler.py   # UTC 往返校验分类 + 展开 / 去重 / 排序 + 扫描线重叠检测
 tests/           # pytest 测试（核心逻辑 + API）
 Dockerfile
 docker-compose.yml

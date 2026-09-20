@@ -3,7 +3,7 @@
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from app.scheduler import classify, expand_schedule
+from app.scheduler import Instance, classify, expand_schedule, find_overlaps
 
 NY = ZoneInfo("America/New_York")
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -122,3 +122,76 @@ def test_berlin_gap_shift():
     assert inst.reason == "gap_shifted_forward"
     # 02:30 + 1h = 03:30 CEST -> 01:30 UTC
     assert inst.utc == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+
+
+def _inst(hh: int, mm: int = 0) -> Instance:
+    return Instance(datetime(2026, 1, 1, hh, mm, tzinfo=timezone.utc), "normal")
+
+
+def test_find_overlaps_basic():
+    # A [08:00, 09:00)，B [08:30, 09:30) -> 重叠 [08:30, 09:00)
+    [ov] = find_overlaps(
+        a_instances=[_inst(8)],
+        a_duration_minutes=60,
+        b_instances=[_inst(8, 30)],
+        b_duration_minutes=60,
+    )
+    assert ov.a_start == datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
+    assert ov.b_start == datetime(2026, 1, 1, 8, 30, tzinfo=timezone.utc)
+    assert ov.start == datetime(2026, 1, 1, 8, 30, tzinfo=timezone.utc)
+    assert ov.end == datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+    assert ov.minutes == 30
+
+
+def test_find_overlaps_boundary_touch_not_conflict():
+    # 半开区间：A [08:00, 09:00) 与 B [09:00, 10:00) 边界相接，不算冲突
+    assert (
+        find_overlaps(
+            a_instances=[_inst(8)],
+            a_duration_minutes=60,
+            b_instances=[_inst(9)],
+            b_duration_minutes=60,
+        )
+        == []
+    )
+
+
+def test_find_overlaps_containment():
+    # B 完全包含于 A
+    [ov] = find_overlaps(
+        a_instances=[_inst(8)],
+        a_duration_minutes=120,
+        b_instances=[_inst(8, 30)],
+        b_duration_minutes=30,
+    )
+    assert ov.start == datetime(2026, 1, 1, 8, 30, tzinfo=timezone.utc)
+    assert ov.end == datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+    assert ov.minutes == 30
+
+
+def test_find_overlaps_multiple_active_per_side():
+    # A 侧两个并行区间都与同一 B 区间重叠，结果按重叠起点排序
+    overlaps = find_overlaps(
+        a_instances=[_inst(8), _inst(8, 30)],
+        a_duration_minutes=60,
+        b_instances=[_inst(8, 15)],
+        b_duration_minutes=60,
+    )
+    assert len(overlaps) == 2
+    assert [o.start for o in overlaps] == [
+        datetime(2026, 1, 1, 8, 15, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 8, 30, tzinfo=timezone.utc),
+    ]
+    assert all(o.minutes == 45 for o in overlaps)
+
+
+def test_find_overlaps_empty_side():
+    assert (
+        find_overlaps(
+            a_instances=[],
+            a_duration_minutes=60,
+            b_instances=[_inst(8)],
+            b_duration_minutes=60,
+        )
+        == []
+    )
